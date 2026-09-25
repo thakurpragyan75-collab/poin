@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { buildReport, type Probe, type SuiteResult } from "@/lib/poin/suites";
 import {
   emptyStats,
   type DriveView,
@@ -46,10 +47,13 @@ type PoinState = {
   brief: string;
   briefState: "idle" | "loading" | "done" | "error";
   diff: Diff | null;
+  probe: Probe | null;
+  criteria: string;
+  report: SuiteResult[];
   stopRequested: boolean;
   goLaunch: () => void;
-  beginLab: (id: SpecimenId) => void;
-  beginRemote: (url: string) => void;
+  beginLab: (id: SpecimenId, criteria: string) => void;
+  beginRemote: (url: string, criteria: string) => void;
   attachDrive: (id: string) => void;
   setSurface: (report: SurfaceReport) => void;
   applyDrive: (view: DriveView) => void;
@@ -59,6 +63,7 @@ type PoinState = {
   setGraph: (nodes: GraphNode[], edges: GraphEdge[]) => void;
   patchStats: (partial: Partial<RunStats>) => void;
   setHighlight: (highlight: Highlight, space: "lab" | "drive") => void;
+  setProbe: (probe: Probe) => void;
   setShot: (shot: string | null, seq: number) => void;
   setNote: (note: string) => void;
   requestStop: () => void;
@@ -117,6 +122,9 @@ const fresh = {
   brief: "",
   briefState: "idle" as const,
   diff: null as Diff | null,
+  probe: null as Probe | null,
+  criteria: "",
+  report: [] as SuiteResult[],
   stopRequested: false,
 };
 
@@ -124,7 +132,7 @@ export const usePoin = create<PoinState>((set, get) => ({
   ...fresh,
   runToken: 0,
   goLaunch: () => set({ ...fresh, runToken: get().runToken, stopRequested: true }),
-  beginLab: (id) =>
+  beginLab: (id, criteria) =>
     set({
       ...fresh,
       screen: "running",
@@ -134,10 +142,11 @@ export const usePoin = create<PoinState>((set, get) => ({
       targetLabel: id === "harbor" ? "Harbor" : id === "northstar" ? "Northstar" : "Lumen",
       targetKey: `lab:${id}`,
       targetUrl: `specimen://${id}`,
+      criteria,
       note: "Live lab. Poin is driving this page for real — in this window, not a recording.",
       stopRequested: false,
     }),
-  beginRemote: (url) =>
+  beginRemote: (url, criteria) =>
     set({
       ...fresh,
       screen: "running",
@@ -146,6 +155,7 @@ export const usePoin = create<PoinState>((set, get) => ({
       targetLabel: url.replace(/^https?:\/\//, "").slice(0, 64),
       targetKey: `url:${url}`,
       targetUrl: url,
+      criteria,
       note: "Opening a browser. Same host only. Destructive controls stay held.",
       stopRequested: false,
     }),
@@ -158,6 +168,7 @@ export const usePoin = create<PoinState>((set, get) => ({
       targetUrl: report.finalUrl,
       targetLabel: report.title || report.finalUrl.replace(/^https?:\/\//, "").slice(0, 64),
       note: "Surface recon. Poin read the public HTML and checked links. It did not press controls on this site.",
+      probe: report.probe,
     }),
   applyDrive: (view) => {
     const s = get();
@@ -174,6 +185,7 @@ export const usePoin = create<PoinState>((set, get) => ({
       note: view.note,
       targetUrl: view.target,
       error: view.error ?? "",
+      probe: view.probe ?? s.probe,
     });
     if ((view.status === "done" || view.status === "error") && get().screen === "running") {
       get().finish();
@@ -195,6 +207,7 @@ export const usePoin = create<PoinState>((set, get) => ({
   setGraph: (nodes, edges) => set({ nodes, edges }),
   patchStats: (partial) => set((s) => ({ stats: { ...s.stats, ...partial } })),
   setHighlight: (highlight, space) => set({ highlight, highlightSpace: space }),
+  setProbe: (probe) => set({ probe }),
   setShot: (shot, seq) => set((s) => ({ shot: shot ?? s.shot, shotSeq: seq })),
   setNote: (note) => set({ note }),
   requestStop: () => set({ stopRequested: true }),
@@ -202,11 +215,22 @@ export const usePoin = create<PoinState>((set, get) => ({
     const s = get();
     if (s.screen === "done") return;
     const titles = s.findings.map((f) => f.title);
+    const diff = baseline(s.targetKey, titles);
+    const report = buildReport({
+      findings: s.findings,
+      stats: s.stats,
+      diff,
+      probe: s.probe,
+      criteria: s.criteria,
+      specimenId: s.specimenId,
+      engine: s.engine,
+    });
     set({
       screen: "done",
       highlight: null,
       stopRequested: false,
-      diff: baseline(s.targetKey, titles),
+      diff,
+      report,
     });
   },
   fail: (message) => set({ ...fresh, runToken: get().runToken, screen: "launch", error: message }),

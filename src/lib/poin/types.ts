@@ -74,6 +74,8 @@ export type SurfaceLink = {
   error?: string;
 };
 
+import type { Probe } from "@/lib/poin/suites";
+
 export type SurfaceReport = {
   finalUrl: string;
   status: number;
@@ -91,6 +93,7 @@ export type SurfaceReport = {
   links: SurfaceLink[];
   findings: Finding[];
   held: string[];
+  probe: Probe;
 };
 
 export type DriveView = {
@@ -107,6 +110,7 @@ export type DriveView = {
   shotSeq: number;
   error?: string;
   note: string;
+  probe: Probe | null;
 };
 
 export function emptyStats(): RunStats {

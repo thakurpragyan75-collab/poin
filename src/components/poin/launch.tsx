@@ -41,6 +41,7 @@ export function Launch() {
   const fail = usePoin((s) => s.fail);
   const [url, setUrl] = useState("");
   const [consent, setConsent] = useState(false);
+  const [criteria, setCriteria] = useState("");
   const [localError, setLocalError] = useState("");
 
   async function onHunt(event: FormEvent) {
@@ -55,7 +56,7 @@ export function Launch() {
       return;
     }
     setLocalError("");
-    beginRemote(trimmed);
+    beginRemote(trimmed, criteria);
     try {
       const result = await startHunt({ data: { url: trimmed, consent: true } });
       if (result.mode === "drive") attachDrive(result.id);
@@ -97,6 +98,19 @@ export function Launch() {
               value={url}
               onChange={(e) => setUrl(e.target.value)}
             />
+            <label className="text-sm text-muted" htmlFor="criteria">
+              Acceptance lines, optional
+            </label>
+            <textarea
+              id="criteria"
+              className="field min-h-24"
+              placeholder={"see: Order confirmed\ncontrol: Add to cart\nclean"}
+              value={criteria}
+              onChange={(e) => setCriteria(e.target.value)}
+            />
+            <p className="text-sm text-faint">
+              One check per line. <span className="font-mono">see:</span> text on the page, <span className="font-mono">control:</span> a named control, or <span className="font-mono">clean</span> for no blocker or major. Blank uses a specimen script, or three inferred checks.
+            </p>
             <label className="flex min-h-11 items-center gap-3 text-sm text-muted">
               <input
                 type="checkbox"
@@ -113,7 +127,7 @@ export function Launch() {
               </button>
             </div>
             <p className="text-sm text-faint">
-              Use staging. Poin will not submit payment, delete, or follow links off the host. Where a browser engine is available it drives the page. Otherwise it reads the public HTML and checks links.
+              The dossier scores smoke, sanity, integration, system, regression, user acceptance, performance, security, usability, and compatibility. Use staging. Poin will not submit payment, delete, or follow links off the host, and it will not run a concurrent load.
             </p>
           </form>
         </section>
@@ -142,7 +156,7 @@ export function Launch() {
                 <p className="text-sm text-faint">{specimen.kind}</p>
                 <h3 className="mt-1 font-serif text-2xl">{specimen.name}</h3>
                 <p className="mt-3 flex-1 text-sm text-muted">{specimen.line}</p>
-                <button type="button" className="btn btn-ghost mt-5" onClick={() => beginLab(specimen.id)}>
+                <button type="button" className="btn btn-ghost mt-5" onClick={() => beginLab(specimen.id, criteria)}>
                   Drive {specimen.name}
                 </button>
               </article>

@@ -56,7 +56,11 @@ export const stopHunt = createServerFn({ method: "POST" })
     return { ok: stopDrive(data.id) };
   });
 
-function judgeInput(input: unknown): { target: string; findings: Pick<Finding, "title" | "severity" | "oracle" | "evidence">[] } {
+function judgeInput(input: unknown): {
+  target: string;
+  findings: Pick<Finding, "title" | "severity" | "oracle" | "evidence">[];
+  suites: string[];
+} {
   if (typeof input !== "object" || input === null) throw new Error("Invalid request");
   const target = "target" in input && typeof input.target === "string" ? input.target.slice(0, 180) : "Unknown target";
   const raw = "findings" in input && Array.isArray(input.findings) ? input.findings : [];
@@ -69,7 +73,11 @@ function judgeInput(input: unknown): { target: string; findings: Pick<Finding, "
     if (!title) return [];
     return [{ title, severity: severity as Finding["severity"], oracle: oracle as Finding["oracle"], evidence }];
   });
-  return { target, findings };
+  const suites = ("suites" in input && Array.isArray(input.suites) ? input.suites : [])
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.slice(0, 280))
+    .slice(0, 10);
+  return { target, findings, suites };
 }
 
 export const judgeHunt = createServerFn({ method: "POST" })
@@ -83,6 +91,8 @@ export const judgeHunt = createServerFn({ method: "POST" })
         : data.findings
             .map((f, i) => `${i + 1}. [${f.severity}/${f.oracle}] ${f.title} — ${f.evidence}`)
             .join("\n");
+    const suites =
+      data.suites.length === 0 ? "" : `\n\nSuite scores:\n${data.suites.map((line, i) => `${i + 1}. ${line}`).join("\n")}`;
     const res = await fetch("https://api.x.ai/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -99,7 +109,7 @@ export const judgeHunt = createServerFn({ method: "POST" })
             content:
               "You are Poin's principal tester. Write a brief an engineer can act on. Do not invent defects that are not in the findings. Plain prose only: no markdown, no asterisks, no headings. Under 150 words. Name the single most important defect first, why it likely happens, then three retests. If there are no findings, say the pass was clean and name what was not covered: payments, auth, and anything held.",
           },
-          { role: "user", content: `Target: ${data.target}\n\nFindings:\n${list}` },
+          { role: "user", content: `Target: ${data.target}\n\nFindings:\n${list}${suites}` },
         ],
       }),
     });

@@ -4,6 +4,7 @@ import { runLab } from "@/lib/poin/lab-agent";
 import { playSurface } from "@/lib/poin/playback";
 import { usePoin } from "@/lib/poin/store";
 import { DRIVE_FRAME, ORACLES, severityRank, type Finding } from "@/lib/poin/types";
+import type { SuiteResult, SuiteStatus } from "@/lib/poin/suites";
 import { Specimen } from "@/components/poin/specimens";
 
 export function Hunt() {
@@ -27,6 +28,7 @@ export function Hunt() {
   const brief = usePoin((s) => s.brief);
   const briefState = usePoin((s) => s.briefState);
   const diff = usePoin((s) => s.diff);
+  const report = usePoin((s) => s.report);
   const goLaunch = usePoin((s) => s.goLaunch);
   const requestStop = usePoin((s) => s.requestStop);
   const applyDrive = usePoin((s) => s.applyDrive);
@@ -103,6 +105,7 @@ export function Hunt() {
             oracle: f.oracle,
             evidence: f.evidence,
           })),
+          suites: report.map((suite) => `${suite.label} (${suite.status}): ${suite.summary}`),
         },
       });
       if (!result.ok) setBriefState("error", result.error);
@@ -119,6 +122,7 @@ export function Hunt() {
       engine,
       stats,
       findings: ordered,
+      report,
       thoughts,
       diff,
       brief,
@@ -248,6 +252,7 @@ export function Hunt() {
           </header>
           {brief ? <p className="max-w-3xl whitespace-pre-wrap text-fg">{brief.replaceAll("**", "")}</p> : null}
           {briefState === "error" ? <p className="text-sm text-clay">{brief}</p> : null}
+          <TestMatrix report={report} />
           {ordered.length === 0 ? (
             <p className="max-w-2xl text-muted">
               No defects recorded. A clean pass is not proof. Payment, login, and anything held were not exercised.
@@ -293,6 +298,50 @@ export function Hunt() {
       ) : null}
     </div>
   );
+}
+
+function TestMatrix({ report }: { report: SuiteResult[] }) {
+  const groups = [
+    ["functional", "Functional"],
+    ["nonfunctional", "Non-functional"],
+  ] as const;
+  if (report.length === 0) return null;
+  return (
+    <div className="grid gap-4 lg:grid-cols-2">
+      {groups.map(([id, label]) => (
+        <section key={id} className="rounded-xl border border-line bg-elev p-4">
+          <h3 className="text-sm text-muted">{label}</h3>
+          <ul className="mt-3 flex flex-col gap-4">
+            {report
+              .filter((suite) => suite.group === id)
+              .map((suite) => (
+                <li key={suite.id}>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <StatusPill status={suite.status} />
+                    <span className="text-sm text-fg">{suite.label}</span>
+                  </div>
+                  <p className="mt-1 text-sm text-muted">{suite.summary}</p>
+                  {suite.evidence.length ? (
+                    <ul className="mt-1 flex flex-col gap-1 text-sm text-faint">
+                      {suite.evidence.slice(0, 3).map((line) => (
+                        <li key={line}>{line}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </li>
+              ))}
+          </ul>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function StatusPill({ status }: { status: SuiteStatus }) {
+  const tone =
+    status === "pass" ? "bg-sage-soft text-sage" : status === "fail" ? "bg-clay-soft text-clay" : "bg-amber-soft text-amber";
+  const label = status === "pass" ? "Pass" : status === "fail" ? "Fail" : "Partial";
+  return <span className={`rounded-full px-2 py-0.5 text-xs ${tone}`}>{label}</span>;
 }
 
 function Stats() {

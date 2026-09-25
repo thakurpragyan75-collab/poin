@@ -1,5 +1,6 @@
 import { parse, type HTMLElement } from "node-html-parser";
 import { assertPublicUrl, PoinGuardError } from "@/lib/poin/guard.server";
+import { SECURITY_HEADERS, emptyProbe, type Probe } from "@/lib/poin/suites";
 import type { Finding, SurfaceControl, SurfaceLink, SurfaceReport } from "@/lib/poin/types";
 
 const UA = "Poin/1.0 (permissioned autonomous check)";
@@ -63,6 +64,7 @@ async function fetchManual(raw: string): Promise<{
   bytes: number;
   ms: number;
   contentType: string;
+  headers: Record<string, string>;
 }> {
   let current = (await assertPublicUrl(raw)).toString();
   const started = Date.now();
@@ -79,6 +81,10 @@ async function fetchManual(raw: string): Promise<{
       continue;
     }
     const contentType = res.headers.get("content-type") ?? "";
+    const headers: Record<string, string> = {};
+    for (const name of SECURITY_HEADERS) {
+      headers[name] = res.headers.get(name) ?? "";
+    }
     const html = await readCapped(res, 400_000);
     return {
       url: current,
@@ -87,6 +93,7 @@ async function fetchManual(raw: string): Promise<{
       bytes: html.length,
       ms: Date.now() - started,
       contentType,
+      headers,
     };
   }
   throw new PoinGuardError("Too many redirects.");
@@ -143,6 +150,12 @@ export async function surface(raw: string): Promise<SurfaceReport> {
       links: [],
       findings,
       held,
+      probe: documentProbe(page, {
+        loaded: false,
+        title: "",
+        pageText: "",
+        controlNames: [],
+      }),
     };
   }
 
@@ -385,6 +398,41 @@ export async function surface(raw: string): Promise<SurfaceReport> {
     controls.push({ kind: "form", name: form.getAttribute("action") || "Form" });
   }
 
+  const https = page.url.startsWith("https:");
+  const password = root.querySelectorAll('input[type="password"]').length > 0;
+  const insecureForm = root.querySelectorAll("form").some((form) => (form.getAttribute("action") || "").startsWith("http://"));
+  if (password && !https) {
+    pushFinding(findings, {
+      id: "password-http",
+      title: "Password field is not on HTTPS",
+      severity: "blocker",
+      oracle: "network",
+      summary: "A password can be read on the wire when the document is not HTTPS. Poin did not submit it.",
+      repro: [`Open ${page.url}`, "Find the password field"],
+      evidence: page.url,
+      fix: "Serve the page over HTTPS before asking for a password.",
+      confidence: 0.95,
+      confirmed: true,
+    });
+  }
+  if (insecureForm) {
+    pushFinding(findings, {
+      id: "form-http",
+      title: "A form posts to http",
+      severity: "major",
+      oracle: "network",
+      summary: "The form action is an insecure URL.",
+      repro: [`Open ${page.url}`, "Inspect form actions"],
+      evidence: "action starts with http://",
+      fix: "Post the form to https.",
+      confidence: 0.9,
+      confirmed: true,
+    });
+  }
+
+  const names = controls.map((control) => control.name).filter(Boolean).slice(0, 40);
+  const failedLinks = links.filter((link) => link.status === null || link.status >= 400).length;
+
   return {
     finalUrl: page.url,
     status: page.status,
@@ -402,5 +450,40 @@ export async function surface(raw: string): Promise<SurfaceReport> {
     links,
     findings,
     held: [...new Set(held)].slice(0, 12),
+    probe: documentProbe(page, {
+      title,
+      pageText: (root.querySelector("body")?.text || root.text || "").replace(/\s+/g, " ").trim().slice(0, 6000),
+      controlNames: names,
+      primaryNamed: names.some((name) => name.trim().length > 0 && name !== "Unnamed button"),
+      hasViewportMeta: Boolean(root.querySelector('meta[name="viewport"]')),
+      passwordOnInsecure: password && !https,
+      insecureFormAction: insecureForm,
+      linksChecked: links.length,
+      linksFailed: failedLinks,
+      navigations: 0,
+      apiOk: links.filter((link) => link.status !== null && link.status < 400).length,
+      apiFail: failedLinks,
+    }),
+  };
+}
+
+function documentProbe(
+  page: { url: string; status: number; html: string; bytes: number; ms: number; headers: Record<string, string> },
+  extra: Partial<Probe>,
+): Probe {
+  const https = page.url.startsWith("https:");
+  const mixed = https
+    ? (page.html.match(/<(?:script|img|link|iframe|source)\b[^>]*(?:src|href)\s*=\s*["']http:\/\//gi) || []).length
+    : 0;
+  return {
+    ...emptyProbe(),
+    loaded: page.status > 0 && page.status < 400,
+    httpStatus: page.status,
+    loadMs: page.ms,
+    bytes: page.bytes,
+    https,
+    securityHeaders: SECURITY_HEADERS.map((name) => ({ name, present: Boolean(page.headers[name]) })),
+    mixedContent: mixed,
+    ...extra,
   };
 }

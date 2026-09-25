@@ -1,4 +1,5 @@
 import { usePoin } from "@/lib/poin/store";
+import type { ViewportShot } from "@/lib/poin/suites";
 import type { Finding, GraphEdge, GraphNode, OracleId, Severity } from "@/lib/poin/types";
 
 const DESTRUCTIVE =
@@ -163,6 +164,51 @@ function fillFor(el: HTMLInputElement | HTMLTextAreaElement): string {
   return "Poin probe";
 }
 
+function measureViewports(root: HTMLElement): ViewportShot[] {
+  const site = siteOf(root);
+  const prevWidth = site.style.width;
+  const prevMax = site.style.maxWidth;
+  const shots: ViewportShot[] = [];
+  for (const width of [390, 768, 1120]) {
+    site.style.width = `${width}px`;
+    site.style.maxWidth = `${width}px`;
+    void site.offsetWidth;
+    const buttons = [...site.querySelectorAll("button")].filter(
+      (el): el is HTMLButtonElement => el instanceof HTMLButtonElement && visible(el),
+    );
+    let overlap = false;
+    let tiny = 0;
+    for (const button of buttons) {
+      const rect = button.getBoundingClientRect();
+      if (rect.width > 2 && (rect.width < 24 || rect.height < 24)) tiny += 1;
+    }
+    for (let i = 0; i < buttons.length && !overlap; i += 1) {
+      for (let j = i + 1; j < buttons.length; j += 1) {
+        const a = buttons[i];
+        const b = buttons[j];
+        if (!a || !b) continue;
+        const ra = a.getBoundingClientRect();
+        const rb = b.getBoundingClientRect();
+        const w = Math.min(ra.right, rb.right) - Math.max(ra.left, rb.left);
+        const h = Math.min(ra.bottom, rb.bottom) - Math.max(ra.top, rb.top);
+        if (w <= 0 || h <= 0) continue;
+        const area = w * h;
+        const minArea = Math.min(ra.width * ra.height, rb.width * rb.height);
+        if (minArea > 0 && area / minArea > 0.4) overlap = true;
+      }
+    }
+    shots.push({
+      width,
+      overflow: site.scrollWidth > site.clientWidth + 8,
+      overlap,
+      tiny,
+    });
+  }
+  site.style.width = prevWidth;
+  site.style.maxWidth = prevMax;
+  return shots;
+}
+
 function slug(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 56);
 }
@@ -183,11 +229,16 @@ export async function runLab({ root, signal }: Ctx) {
     originalError.apply(console, args);
   };
   const originalFetch = window.fetch.bind(window);
+  let apiOk = 0;
+  let apiFail = 0;
   window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     const res = await originalFetch(input, init);
     if (res.status >= 400) {
+      apiFail += 1;
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       nets.push(`${res.status} ${url}`);
+    } else {
+      apiOk += 1;
     }
     return res;
   };
@@ -204,6 +255,9 @@ export async function runLab({ root, signal }: Ctx) {
   let flakes = 0;
   let loops = 0;
   let previousSig = "";
+  let slowPresses = 0;
+  const seenText: string[] = [];
+  const seenNames = new Set<string>();
 
   const say = (kind: "think" | "act" | "observe" | "bug" | "guard" | "done", text: string) => {
     usePoin.getState().appendThought(kind, text);
@@ -245,6 +299,7 @@ export async function runLab({ root, signal }: Ctx) {
           if (from) edges.push({ from, to: nodeId });
         }
         nodes.push({ id: nodeId, label: labelOf(root), tried: 0, total: 0, bugs: 0 });
+        seenText.push((siteOf(root).innerText || "").replace(/\s+/g, " ").trim().slice(0, 900));
         say("observe", `New screen “${labelOf(root)}”.`);
       } else if (previousSig && previousSig !== sig) {
         loops += 1;
@@ -252,6 +307,9 @@ export async function runLab({ root, signal }: Ctx) {
       }
       previousSig = sig;
       const list = controlsIn(root);
+      for (const control of list) {
+        if (control.name) seenNames.add(control.name);
+      }
       const node = nodes.find((n) => n.id === nodeId);
       if (node) {
         node.total = list.length;
@@ -303,7 +361,9 @@ export async function runLab({ root, signal }: Ctx) {
           next.el.dispatchEvent(new Event("change", { bubbles: true }));
         }
       } else {
+        const started = performance.now();
         next.el.click();
+        if (performance.now() - started > 500) slowPresses += 1;
       }
       actions += 1;
       await sleep(260, signal);
@@ -394,10 +454,28 @@ export async function runLab({ root, signal }: Ctx) {
       publish();
     }
     if (!signal.aborted && !usePoin.getState().stopRequested) {
-      say("done", "Hunt complete.");
+      publishProbe(root, target, {
+        errors: errors.length,
+        apiOk,
+        apiFail,
+        slowPresses,
+        navigations: Math.max(0, nodes.length - 1),
+        seenText,
+        seenNames,
+      });
+      say("done", "Hunt complete. Scoring smoke through compatibility.");
       publish();
       usePoin.getState().finish();
     } else if (usePoin.getState().stopRequested && usePoin.getState().screen === "running") {
+      publishProbe(root, target, {
+        errors: errors.length,
+        apiOk,
+        apiFail,
+        slowPresses,
+        navigations: Math.max(0, nodes.length - 1),
+        seenText,
+        seenNames,
+      });
       say("done", "Stopped. Partial dossier kept.");
       publish();
       usePoin.getState().finish();
@@ -408,6 +486,48 @@ export async function runLab({ root, signal }: Ctx) {
     window.fetch = originalFetch;
     usePoin.getState().setHighlight(null, "lab");
   }
+}
+
+function publishProbe(
+  root: HTMLElement,
+  target: string,
+  bag: {
+    errors: number;
+    apiOk: number;
+    apiFail: number;
+    slowPresses: number;
+    navigations: number;
+    seenText: string[];
+    seenNames: Set<string>;
+  },
+) {
+  const controlNames = [...bag.seenNames].slice(0, 40);
+  usePoin.getState().setProbe({
+    loaded: true,
+    httpStatus: null,
+    title: target,
+    pageText: bag.seenText.join("\n").slice(0, 6000),
+    controlNames,
+    loadMs: null,
+    dclMs: null,
+    bytes: null,
+    slowResources: 0,
+    slowPresses: bag.slowPresses,
+    consoleErrors: bag.errors,
+    navigations: bag.navigations,
+    apiOk: bag.apiOk,
+    apiFail: bag.apiFail,
+    https: null,
+    securityHeaders: [],
+    mixedContent: 0,
+    passwordOnInsecure: false,
+    insecureFormAction: false,
+    hasViewportMeta: null,
+    viewports: measureViewports(root),
+    primaryNamed: controlNames.some((name) => name.trim().length > 0),
+    linksChecked: 0,
+    linksFailed: 0,
+  });
 }
 
 function scan(

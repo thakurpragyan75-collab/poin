@@ -46,3 +46,21 @@ npm run build      # production build
 npm run typecheck
 npm test
 ```
+
+## What the dossier scores
+
+Functional: smoke, sanity, integration, system, regression, user acceptance.
+
+Non-functional: performance and load, security, usability, compatibility.
+
+Each row is Pass, Fail, or Partial, with the evidence Poin actually collected. A partial means the check ran but is not a full proof — for example, load is a single-user timing because Poin does not open concurrent sessions, and compatibility is Chromium at 390, 768, and 1120, not Firefox or Safari. Security is passive (HTTPS, headers, mixed content). Poin does not send attack payloads.
+
+Optional acceptance lines, one per line:
+
+```
+see: Order confirmed
+control: Add to cart
+clean
+```
+
+`see:` looks for visible text. `control:` looks for a named control. `clean` fails if a blocker or major defect was found. Leave the box blank and a specimen uses its own script; any other URL gets three inferred checks, which is not a signed user acceptance.

@@ -1,4 +1,5 @@
 import { assertPublicUrl, PoinGuardError } from "@/lib/poin/guard.server";
+import { SECURITY_HEADERS, emptyProbe, type Probe } from "@/lib/poin/suites";
 import {
   DRIVE_FRAME,
   emptyStats,
@@ -26,6 +27,7 @@ type Run = {
   error?: string;
   note: string;
   stop: boolean;
+  probe: Probe | null;
 };
 
 type GlobalPoin = typeof globalThis & {
@@ -60,6 +62,7 @@ function viewOf(run: Run, sinceSeq: number): DriveView {
     shotSeq: run.shotSeq,
     error: run.error,
     note: run.note,
+    probe: run.status === "running" ? null : run.probe,
   };
 }
 
@@ -122,6 +125,7 @@ export async function beginDrive(raw: string): Promise<string> {
     shotSeq: 0,
     note: UA_NOTE,
     stop: false,
+    probe: null,
   };
   runs().set(id, run);
   if (runs().size > 6) {
@@ -187,6 +191,7 @@ export async function execute(
   const page = await context.newPage();
   const consoleErrors: string[] = [];
   const netFails: string[] = [];
+  let apiOk = 0;
   const seenErr = new Set<string>();
   const seenNet = new Set<string>();
   page.on("console", (msg) => {
@@ -200,6 +205,8 @@ export async function execute(
     const status = res.status();
     if (status >= 400 && !/favicon|analytics|doubleclick/i.test(res.url())) {
       netFails.push(`${status} ${res.url().slice(0, 160)}`);
+    } else if (status >= 200 && status < 400) {
+      apiOk += 1;
     }
   });
   await page.route("**/*", async (route) => {
@@ -231,7 +238,8 @@ export async function execute(
   });
 
   think(run, "think", "Opening the document. Mapping controls before any press.");
-  await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
+  const response = await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
+  const headerBag = response?.headers() ?? {};
   await page.waitForTimeout(500);
   const origin = new URL(page.url()).origin;
   const deadline = Date.now() + 42_000;
@@ -241,6 +249,9 @@ export async function execute(
   let lastSig = "";
   const sigNode = new Map<string, string>();
   let steps = 0;
+  let slowPresses = 0;
+  const seenText: string[] = [];
+  const seenNames: string[] = [];
   const maxSteps = 14;
 
   while (!run.stop && steps < maxSteps && Date.now() < deadline) {
@@ -259,6 +270,7 @@ export async function execute(
       sigNode.set(signature, id);
       if (previous) run.edges.push({ from: previous, to: id });
       run.nodes.push({ id, label, tried: 0, total: 0, bugs: 0 });
+      seenText.push(signature.split("|").slice(1).join("|").slice(0, 900));
       previous = id;
     } else if (lastSig && lastSig !== signature) {
       run.stats.loopsCut += 1;
@@ -299,6 +311,9 @@ export async function execute(
     }
     run.stats.controls = Math.max(run.stats.controls, candidates.length);
     const next = candidates.find((c) => !bag.has(c.key));
+    for (const candidate of candidates) {
+      if (candidate.name && seenNames.length < 40 && !seenNames.includes(candidate.name)) seenNames.push(candidate.name);
+    }
     if (!next) {
       think(run, "think", "Every safe control on the reached screens has been tried. Stopping.");
       break;
@@ -337,8 +352,10 @@ export async function execute(
     const beforeUrl = page.url();
     const errMark = consoleErrors.length;
     const netMark = netFails.length;
+    const pressedAt = Date.now();
     try {
       await page.locator(next.selector).first().click({ timeout: 3500 });
+      if (Date.now() - pressedAt > 1500) slowPresses += 1;
     } catch {
       addFinding(run, {
         id: `click-fail-${next.key}`.slice(0, 90),
@@ -444,12 +461,195 @@ export async function execute(
     run.note = "Stopped. Partial dossier kept.";
     think(run, "done", "Stopped by request.");
   } else {
-    think(run, "done", "Hunt complete.");
+    think(run, "done", "Hunt complete. Scoring smoke through compatibility.");
+  }
+  try {
+    run.probe = await sealDriveProbe(page, run, {
+      headers: headerBag,
+      httpStatus: response?.status() ?? null,
+      apiOk,
+      apiFail: netFails.length,
+      consoleErrors: consoleErrors.length,
+      slowPresses,
+      seenText,
+      seenNames,
+    });
+  } catch {
+    run.probe = {
+      ...emptyProbe(),
+      loaded: true,
+      httpStatus: response?.status() ?? null,
+      title: run.target,
+      pageText: seenText.join("\n").slice(0, 6000),
+      controlNames: seenNames,
+      consoleErrors: consoleErrors.length,
+      navigations: Math.max(0, run.stats.states - 1),
+      apiOk,
+      apiFail: netFails.length,
+      slowPresses,
+      https: page.url().startsWith("https:"),
+      primaryNamed: seenNames.length > 0,
+    };
   }
   await shoot(page, run, null).catch(() => undefined);
   run.status = "done";
   run.highlight = null;
   await context.close().catch(() => undefined);
+}
+
+function readTiming(): {
+  title: string;
+  loadMs: number | null;
+  dclMs: number | null;
+  bytes: number | null;
+  slowResources: number;
+  mixed: number;
+  passwordOnInsecure: boolean;
+  insecureFormAction: boolean;
+  hasViewportMeta: boolean;
+} {
+  const nav = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
+  const resources = performance.getEntriesByType("resource") as PerformanceResourceTiming[];
+  const https = location.protocol === "https:";
+  let insecureFormAction = false;
+  for (const form of document.querySelectorAll("form")) {
+    const action = form.getAttribute("action") || "";
+    if (action.startsWith("http://")) insecureFormAction = true;
+  }
+  return {
+    title: document.title || "",
+    loadMs: nav ? Math.round(nav.loadEventEnd || nav.duration || 0) : null,
+    dclMs: nav ? Math.round(nav.domContentLoadedEventEnd || 0) : null,
+    bytes: nav ? nav.transferSize || nav.encodedBodySize || 0 : null,
+    slowResources: resources.filter((entry) => entry.duration > 1000).length,
+    mixed: https ? resources.filter((entry) => entry.name.startsWith("http://")).length : 0,
+    passwordOnInsecure: Boolean(document.querySelector('input[type="password"]')) && !https,
+    insecureFormAction,
+    hasViewportMeta: Boolean(document.querySelector('meta[name="viewport"]')),
+  };
+}
+
+function readViewport(): { overflow: boolean; overlap: boolean; tiny: number } {
+  const doc = document.documentElement;
+  const nodes = [...document.querySelectorAll("button, a, [role='button']")].filter((el) => {
+    const rect = el.getBoundingClientRect();
+    return rect.width > 2 && rect.height > 2;
+  });
+  const rects = nodes.map((el) => el.getBoundingClientRect());
+  let tiny = 0;
+  let overlap = false;
+  for (const rect of rects) {
+    if (rect.width < 24 || rect.height < 24) tiny += 1;
+  }
+  for (let i = 0; i < rects.length && !overlap; i += 1) {
+    for (let j = i + 1; j < rects.length; j += 1) {
+      const ra = rects[i];
+      const rb = rects[j];
+      if (!ra || !rb) continue;
+      const w = Math.min(ra.right, rb.right) - Math.max(ra.left, rb.left);
+      const h = Math.min(ra.bottom, rb.bottom) - Math.max(ra.top, rb.top);
+      if (w <= 0 || h <= 0) continue;
+      const minArea = Math.min(ra.width * ra.height, rb.width * rb.height);
+      if (minArea > 0 && (w * h) / minArea > 0.4) overlap = true;
+    }
+  }
+  return { overflow: doc.scrollWidth > doc.clientWidth + 8, overlap, tiny };
+}
+
+async function sealDriveProbe(
+  page: import("playwright").Page,
+  run: Run,
+  bag: {
+    headers: Record<string, string>;
+    httpStatus: number | null;
+    apiOk: number;
+    apiFail: number;
+    consoleErrors: number;
+    slowPresses: number;
+    seenText: string[];
+    seenNames: string[];
+  },
+): Promise<Probe> {
+  const timing = await page.evaluate(readTiming);
+  const viewports: Probe["viewports"] = [];
+  for (const width of [390, 768, 1120]) {
+    await page.setViewportSize({ width, height: 800 });
+    const shot = await page.evaluate(readViewport);
+    viewports.push({ width, ...shot });
+  }
+  await page.setViewportSize({ width: DRIVE_FRAME.w, height: DRIVE_FRAME.h });
+  const https = page.url().startsWith("https:");
+  if (timing.passwordOnInsecure) {
+    addFinding(run, {
+      id: "password-http",
+      title: "Password field is not on HTTPS",
+      severity: "blocker",
+      oracle: "network",
+      summary: "A password can be read on the wire when the document is not HTTPS.",
+      repro: [`Open ${page.url()}`, "Find the password field"],
+      evidence: page.url(),
+      fix: "Serve the page over HTTPS before asking for a password.",
+      confidence: 0.95,
+      confirmed: true,
+    });
+  }
+  if (timing.insecureFormAction) {
+    addFinding(run, {
+      id: "form-http",
+      title: "A form posts to http",
+      severity: "major",
+      oracle: "network",
+      summary: "The form action is an insecure URL.",
+      repro: [`Open ${page.url()}`, "Inspect form actions"],
+      evidence: "action starts with http://",
+      fix: "Post the form to https.",
+      confidence: 0.9,
+      confirmed: true,
+    });
+  }
+  const broken = viewports.find((shot) => shot.overflow || shot.overlap);
+  if (broken) {
+    addFinding(run, {
+      id: `viewport-${broken.width}`,
+      title: `Layout breaks at ${broken.width}px`,
+      severity: "major",
+      oracle: "visual",
+      summary: "At this Chromium width the page overflows or two controls overlap.",
+      repro: [`Open ${page.url()}`, `Set the viewport to ${broken.width}px wide`],
+      evidence: [broken.overflow ? "horizontal overflow" : "", broken.overlap ? "overlapping controls" : ""]
+        .filter(Boolean)
+        .join(", "),
+      fix: "Reflow the layout at this width. Poin did not launch Firefox or Safari.",
+      confidence: 0.84,
+      confirmed: true,
+    });
+  }
+  return {
+    loaded: true,
+    httpStatus: bag.httpStatus,
+    title: timing.title,
+    pageText: bag.seenText.join("\n").slice(0, 6000),
+    controlNames: bag.seenNames,
+    loadMs: timing.loadMs,
+    dclMs: timing.dclMs,
+    bytes: timing.bytes,
+    slowResources: timing.slowResources,
+    slowPresses: bag.slowPresses,
+    consoleErrors: bag.consoleErrors,
+    navigations: Math.max(0, run.stats.states - 1),
+    apiOk: bag.apiOk,
+    apiFail: bag.apiFail,
+    https,
+    securityHeaders: SECURITY_HEADERS.map((name) => ({ name, present: Boolean(bag.headers[name]) })),
+    mixedContent: timing.mixed,
+    passwordOnInsecure: timing.passwordOnInsecure,
+    insecureFormAction: timing.insecureFormAction,
+    hasViewportMeta: timing.hasViewportMeta,
+    viewports,
+    primaryNamed: bag.seenNames.some((name) => name.trim().length > 0),
+    linksChecked: 0,
+    linksFailed: 0,
+  };
 }
 
 function collectCandidates(): Candidate[] {
